@@ -1,0 +1,27 @@
+receivers:
+  mqtt:
+    broker: ${env:MQTT_BROKER:-tcp://127.0.0.1:1883}
+    username: ${env:MQTT_USERNAME:-}
+    password: ${env:MQTT_PASSWORD:-}
+    topics: ["${env:MQTT_TOPIC}"]
+
+connectors:
+  signaltometrics:
+    logs:
+      - name: sensor.value
+        description: Sensor value
+        gauge:
+          value: ParseJSON(body)["data"]["value"]
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    logs:
+      receivers: [mqtt]
+      exporters: [signaltometrics]
+    metrics:
+      receivers: [signaltometrics]
+      exporters: [debug]

@@ -1,0 +1,19 @@
+type: mqtt
+
+status:
+  class: receiver
+  stability:
+    development: [logs]
+  codeowners:
+    active: [abicky]
+
+tests:
+  config:
+    broker: tcp://127.0.0.1:1883
+    topics: [test/topic]
+  goleak:
+    setup: beforeAll()
+    teardown: afterAll()
+    ignore:
+      top:
+        - github.com/testcontainers/testcontainers-go.(*Reaper).connect.func1

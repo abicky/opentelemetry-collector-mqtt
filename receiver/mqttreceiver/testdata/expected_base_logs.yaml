@@ -1,0 +1,37 @@
+resourceLogs:
+  - resource:
+      attributes:
+        - key: server.address
+          value:
+            stringValue: localhost
+        - key: server.port
+          value:
+            intValue: 1883
+        - key: url.scheme
+          value:
+            stringValue: tcp
+        - key: mqtt.topic
+          value:
+            stringValue: test/topic/TestLogsReceiverConsumeLogs
+    scopeLogs:
+      - logRecords:
+          - attributes:
+              - key: messaging.message.id
+                value:
+                  stringValue: "0"
+              - key: mqtt.message.qos
+                value:
+                  intValue: 0
+              - key: mqtt.message.duplicate
+                value:
+                  boolValue: false
+              - key: mqtt.message.retained
+                value:
+                  boolValue: false
+            body:
+              stringValue: ""
+            observedTimeUnixNano: "1769181947020147000"
+            spanId: ""
+            timeUnixNano: "1769181947020147000"
+            traceId: ""
+        scope: {}

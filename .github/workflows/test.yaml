@@ -1,0 +1,41 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - receiver/mqttreceiver
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+
+      # `go test` uses only a high-confidence subset of go vet, so execute also `go vet`
+      - run: go vet ./...
+
+      - name: Format code
+        run: |
+          gofmt -s -w -e .
+          git diff --exit-code || \
+            (echo; echo "Unexpected difference in directories after formatting code. Run 'gofmt -s -w -e .' command and commit."; exit 1)
+
+      - name: Generate code
+        run: |
+          go generate ./...
+          git diff --exit-code || \
+            (echo; echo "Unexpected difference in directories after code generation. Run 'go generate ./...' command and commit."; exit 1)
+
+      - run: go test -v ./...

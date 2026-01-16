@@ -1,0 +1,73 @@
+receivers:
+  mqtt:
+    broker: ${env:MQTT_BROKER:-tcp://127.0.0.1:1883}
+    username: ${env:MQTT_USERNAME:-}
+    password: ${env:MQTT_PASSWORD:-}
+    topics: ["${env:MQTT_TOPIC}"]
+
+connectors:
+  signaltometrics:
+    logs:
+      - name: sensor.value
+        description: Sensor value
+        gauge:
+          value: ParseJSON(body)["data"]["value"]
+
+exporters:
+  # See: https://grafana.com/docs/opentelemetry/collector/opentelemetry-collector/
+  # NOTE: The OTLP endpoint does not support custom labels
+  otlphttp/grafana_cloud:
+    endpoint: "${env:GRAFANA_CLOUD_OTLP_ENDPOINT}"
+    auth:
+      authenticator: basicauth/grafana_cloud_otlp
+  prometheusremotewrite/grafana_cloud:
+    endpoint: "${env:GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_ENDPOINT}"
+    auth:
+      authenticator: basicauth/grafana_cloud_prometehus
+    resource_to_telemetry_conversion:
+      enabled: true
+  debug:
+    verbosity: detailed
+
+extensions:
+  basicauth/grafana_cloud_otlp:
+    # https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/extension/basicauthextension
+    client_auth:
+      username: "${env:GRAFANA_CLOUD_INSTANCE_ID}"
+      password: "${env:GRAFANA_CLOUD_API_KEY}"
+  basicauth/grafana_cloud_prometehus:
+    # https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/extension/basicauthextension
+    client_auth:
+      username: "${env:GRAFANA_CLOUD_PROMETHEUS_USER}"
+      password: "${env:GRAFANA_CLOUD_API_KEY}"
+
+processors:
+  transform/drop_unneeded_resource_attributes:
+    # https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/transformprocessor
+    metric_statements:
+      - context: resource
+        statements:
+          - delete_key(attributes, "signaltometrics.service.instance.id")
+
+service:
+  extensions: [basicauth/grafana_cloud_otlp, basicauth/grafana_cloud_prometehus]
+  pipelines:
+    logs:
+      receivers: [mqtt]
+      exporters: [signaltometrics, debug]
+    metrics:
+      receivers: [signaltometrics]
+      processors: [transform/drop_unneeded_resource_attributes]
+      exporters: [prometheusremotewrite/grafana_cloud, debug]
+  telemetry:
+    logs:
+      # See: https://opentelemetry.io/docs/collector/internal-telemetry/#configure-internal-logs
+      processors:
+        - batch:
+            exporter:
+              otlp:
+                protocol: http/protobuf
+                endpoint: "${env:GRAFANA_CLOUD_OTLP_ENDPOINT}/v1/logs"
+                headers:
+                  - name: Authorization
+                    value: "Basic ${env:GRAFANA_CLOUD_OTLP_BASIC_AUTH}"
