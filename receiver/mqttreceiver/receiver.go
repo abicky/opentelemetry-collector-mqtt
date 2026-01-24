@@ -8,10 +8,13 @@ import (
 	"time"
 
 	"github.com/eclipse/paho.mqtt.golang"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/ottl"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/ottl/contexts/ottllog"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/receiver"
 	semconv "go.opentelemetry.io/otel/semconv/v1.38.0"
 	"go.uber.org/zap"
 )
@@ -26,13 +29,20 @@ type logsReceiver struct {
 	logger       *zap.Logger
 	nextConsumer consumer.Logs
 	cancel       context.CancelFunc
+	timestampExp *ottl.ValueExpression[*ottllog.TransformContext]
 }
 
-func newLogsReceiver(cfg *Config, logger *zap.Logger, nextConsumer consumer.Logs) (*logsReceiver, error) {
+func newLogsReceiver(cfg *Config, settings receiver.Settings, nextConsumer consumer.Logs) (*logsReceiver, error) {
+	timestampExp, err := cfg.parseTimestampExpression(settings.TelemetrySettings)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse timestamp: %w", err)
+	}
+
 	return &logsReceiver{
 		config:       cfg,
-		logger:       logger,
+		logger:       settings.Logger,
 		nextConsumer: nextConsumer,
+		timestampExp: timestampExp,
 	}, nil
 }
 
@@ -88,9 +98,9 @@ func (lr *logsReceiver) handleMessage(client mqtt.Client, msg mqtt.Message) {
 	reader := client.OptionsReader()
 	brokerURL := reader.Servers()[0]
 
-	rl := logs.ResourceLogs().AppendEmpty()
+	resourceLogs := logs.ResourceLogs().AppendEmpty()
 
-	resourceAttrs := rl.Resource().Attributes()
+	resourceAttrs := resourceLogs.Resource().Attributes()
 	resourceAttrs.PutStr(string(semconv.ServerAddressKey), brokerURL.Hostname())
 	if brokerURL.Port() != "" {
 		port, err := strconv.Atoi(brokerURL.Port())
@@ -106,7 +116,8 @@ func (lr *logsReceiver) handleMessage(client mqtt.Client, msg mqtt.Message) {
 		resourceAttrs.PutStr("mqtt.username", lr.config.Username)
 	}
 
-	logRecord := rl.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+	scopeLogs := resourceLogs.ScopeLogs().AppendEmpty()
+	logRecord := scopeLogs.LogRecords().AppendEmpty()
 	logRecord.SetObservedTimestamp(now)
 	logRecord.SetTimestamp(now)
 	logRecord.Body().SetStr(string(msg.Payload()))
@@ -115,10 +126,35 @@ func (lr *logsReceiver) handleMessage(client mqtt.Client, msg mqtt.Message) {
 	logRecord.Attributes().PutBool("mqtt.message.duplicate", msg.Duplicate())
 	logRecord.Attributes().PutBool("mqtt.message.retained", msg.Retained())
 
+	if lr.timestampExp != nil {
+		tCtx := ottllog.NewTransformContextPtr(resourceLogs, scopeLogs, logRecord)
+		timestamp, err := lr.evalTimestamp(tCtx)
+		tCtx.Close()
+		if err == nil {
+			logRecord.SetTimestamp(pcommon.NewTimestampFromTime(timestamp))
+		} else {
+			lr.logger.Warn("Failed to evaluate timestamp", zap.Error(err))
+		}
+	}
+
 	if err := lr.nextConsumer.ConsumeLogs(context.Background(), logs); err != nil {
 		lr.logger.Error("Failed to consume logs", zap.Error(err))
 		return
 	}
+}
+
+func (lr *logsReceiver) evalTimestamp(tCtx *ottllog.TransformContext) (time.Time, error) {
+	timestampValue, err := lr.timestampExp.Eval(context.Background(), tCtx)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	v, ok := timestampValue.(time.Time)
+	if !ok {
+		return time.Time{}, fmt.Errorf("parsed value is not time.Time but %T", timestampValue)
+	}
+
+	return v, nil
 }
 
 func waitToken(ctx context.Context, token mqtt.Token) error {

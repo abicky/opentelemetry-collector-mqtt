@@ -7,12 +7,13 @@ The MQTT message payload is stored in the log body as a UTF-8 string.
 
 ## Configuration
 
-| Name       | Required | Description                                                                              |
-|------------|----------|------------------------------------------------------------------------------------------|
-| `broker`   | Yes      | MQTT broker URL. Only the `tcp://` scheme is supported, and the URL must include a port. |
-| `topics`   | Yes      | List of MQTT topics to subscribe to.                                                     |
-| `username` | No       | Username used for broker authentication.                                                 |
-| `password` | No       | Password used for broker authentication.                                                 |
+| Name        | Required | Description                                                                                                                                                         |
+|-------------|----------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `broker`    | Yes      | MQTT broker URL. Only the `tcp://` scheme is supported, and the URL must include a port.                                                                            |
+| `topics`    | Yes      | List of MQTT topics to subscribe to.                                                                                                                                |
+| `username`  | No       | Username used for broker authentication.                                                                                                                            |
+| `password`  | No       | Password used for broker authentication.                                                                                                                            |
+| `timestamp` | No       | [OTTL](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/v0.144.0/pkg/ottl) statement for extracting log record timestamps from the MQTT payload. If omitted, the observed time is used. |
 
 ### Example configuration
 
@@ -23,6 +24,7 @@ receivers:
     topics: ["${env:MQTT_TOPIC}"]
     username: ${env:MQTT_USERNAME:-}
     password: ${env:MQTT_PASSWORD:-}
+    timestamp: Time(ParseJSON(log.body.string)["time"], "%Y-%m-%dT%H:%M:%S%z")
 ```
 
 ## Emitted attributes

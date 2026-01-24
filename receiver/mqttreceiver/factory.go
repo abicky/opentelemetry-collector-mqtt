@@ -22,6 +22,6 @@ func createDefaultConfig() component.Config {
 	return &Config{}
 }
 
-func createLogsReceiver(_ context.Context, params receiver.Settings, baseCfg component.Config, consumer consumer.Logs) (receiver.Logs, error) {
-	return newLogsReceiver(baseCfg.(*Config), params.Logger, consumer)
+func createLogsReceiver(_ context.Context, settings receiver.Settings, baseCfg component.Config, consumer consumer.Logs) (receiver.Logs, error) {
+	return newLogsReceiver(baseCfg.(*Config), settings, consumer)
 }

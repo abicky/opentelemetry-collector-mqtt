@@ -9,10 +9,12 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/golden"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest/plogtest"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/consumer/consumertest"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
-	"go.uber.org/zap"
+	"go.opentelemetry.io/collector/receiver/receivertest"
 )
 
 type configModifier func(*Config)
@@ -64,6 +66,19 @@ func Test_logsReceiver(t *testing.T) {
 				logs.ResourceLogs().At(0).Resource().Attributes().PutStr("mqtt.username", "username")
 			},
 		},
+		{
+			name:            "With timestamp",
+			payload:         `{"time":"2026-01-23T12:34:56+0000"}`,
+			compareLogsOpts: []plogtest.CompareLogsOption{plogtest.IgnoreObservedTimestamp()},
+			configModifier: func(cfg *Config) {
+				cfg.Timestamp = `Time(ParseJSON(log.body.string)["time"], "%Y-%m-%dT%H:%M:%S%z")`
+			},
+			logModifier: func(logs plog.Logs) {
+				ts, err := time.Parse("2006-01-02T15:04:05-0700", "2026-01-23T12:34:56+0000")
+				require.NoError(t, err, "Failed to parse timestamp for test")
+				logs.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0).SetTimestamp(pcommon.NewTimestampFromTime(ts))
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -75,7 +90,7 @@ func Test_logsReceiver(t *testing.T) {
 			tt.configModifier(cfg)
 
 			sink := new(consumertest.LogsSink)
-			receiver, err := newLogsReceiver(cfg, zap.NewNop(), sink)
+			receiver, err := newLogsReceiver(cfg, receivertest.NewNopSettings(component.MustNewType("mqtt")), sink)
 			require.NoError(t, err, "Failed to create receiver")
 
 			require.NoError(t, receiver.Start(t.Context(), componenttest.NewNopHost()), "Failed to start receiver")

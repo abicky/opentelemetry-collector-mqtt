@@ -1,0 +1,18 @@
+receivers:
+  mqtt:
+    broker: ${env:MQTT_BROKER:-tcp://127.0.0.1:1883}
+    topics: ["${env:MQTT_TOPIC}"]
+    username: ${env:MQTT_USERNAME}
+    password: ${env:MQTT_PASSWORD}
+    # The payload is in JSON format and contains the `data.timestamp` field in ISO 8601 format.
+    timestamp: Time(ParseJSON(log.body.string)["data"]["timestamp"], "%Y-%m-%dT%H:%M:%S%z")
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    logs:
+      receivers: [mqtt]
+      exporters: [debug]
