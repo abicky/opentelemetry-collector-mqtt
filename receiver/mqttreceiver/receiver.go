@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/eclipse/paho.mqtt.golang"
@@ -47,7 +48,7 @@ func newLogsReceiver(cfg *Config, settings receiver.Settings, nextConsumer consu
 }
 
 func (lr *logsReceiver) Start(ctx context.Context, _ component.Host) error {
-	lr.logger.Debug("Connect to the broker", zap.String("broker", lr.config.Broker), zap.String("username", lr.config.Username))
+	lr.logger.Debug("Connect to the MQTT broker", zap.String("broker", lr.config.Broker), zap.String("username", lr.config.Username))
 
 	opts := mqtt.NewClientOptions()
 
@@ -55,23 +56,51 @@ func (lr *logsReceiver) Start(ctx context.Context, _ component.Host) error {
 	opts.SetUsername(lr.config.Username)
 	opts.SetPassword(lr.config.Password)
 
+	var connected atomic.Bool
+	opts.SetOnConnectHandler(func(client mqtt.Client) {
+		lr.logger.Debug("Connected to the MQTT broker", zap.String("broker", lr.config.Broker))
+
+		// Initial subscriptions are handled synchronously below.
+		if !connected.Swap(true) {
+			return
+		}
+
+		if err := lr.subscribe(context.Background(), client); err != nil {
+			lr.logger.Error("Failed to restore MQTT subscriptions after reconnecting", zap.Error(err))
+		}
+	})
+	opts.SetConnectionLostHandler(func(_ mqtt.Client, err error) {
+		lr.logger.Warn("Lost connection to the MQTT broker", zap.String("broker", lr.config.Broker), zap.Error(err))
+	})
+	opts.SetReconnectingHandler(func(_ mqtt.Client, _ *mqtt.ClientOptions) {
+		lr.logger.Info("Reconnecting to the MQTT broker", zap.String("broker", lr.config.Broker))
+	})
+
 	lr.brokerURL = opts.Servers[0]
 
 	client := mqtt.NewClient(opts)
 	lr.cancel = func() {
 		client.Disconnect(1_000)
-		lr.logger.Debug("Disconnected the broker", zap.String("broker", lr.config.Broker))
+		lr.logger.Debug("Disconnected the MQTT broker", zap.String("broker", lr.config.Broker))
 	}
 
 	if err := waitToken(ctx, client.Connect()); err != nil {
 		lr.cancel()
-		return fmt.Errorf("failed to connect to the broker: %w", err)
+		return fmt.Errorf("failed to connect to the MQTT broker: %w", err)
 	}
 
+	if err := lr.subscribe(ctx, client); err != nil {
+		lr.cancel()
+		return err
+	}
+
+	return nil
+}
+
+func (lr *logsReceiver) subscribe(ctx context.Context, client mqtt.Client) error {
 	for _, topic := range lr.config.Topics {
 		lr.logger.Debug("Subscribe to the topic", zap.String("topic", topic))
 		if err := waitToken(ctx, client.Subscribe(topic, 0, lr.handleMessage)); err != nil {
-			lr.cancel()
 			return fmt.Errorf("failed to subscribe to the %q topic: %w", topic, err)
 		}
 	}

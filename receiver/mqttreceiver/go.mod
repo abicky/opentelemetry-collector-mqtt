@@ -3,6 +3,7 @@ module github.com/abicky/opentelemetry-collector-mqtt/receiver/mqttreceiver
 go 1.25.0
 
 require (
+	github.com/Shopify/toxiproxy/v2 v2.12.0
 	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/moby/moby/api v1.55.0
 	github.com/open-telemetry/opentelemetry-collector-contrib/pkg/golden v0.144.0
@@ -10,6 +11,7 @@ require (
 	github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest v0.144.0
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.44.0
+	github.com/testcontainers/testcontainers-go/modules/toxiproxy v0.44.0
 	go.opentelemetry.io/collector/component v1.50.0
 	go.opentelemetry.io/collector/component/componenttest v0.144.0
 	go.opentelemetry.io/collector/confmap v1.50.0
