@@ -3,11 +3,12 @@ package mqttreceiver
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/go-connections/nat"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -33,9 +34,9 @@ func startMQTTBroker() *testcontainers.DockerContainer {
 		),
 		// Bind 1883 port for TestComponentLifecycle, where the port cannot be set dynamically
 		testcontainers.WithHostConfigModifier(func(hostConfig *container.HostConfig) {
-			hostConfig.PortBindings = nat.PortMap{"1883/tcp": []nat.PortBinding{
+			hostConfig.PortBindings = network.PortMap{network.MustParsePort("1883/tcp"): []network.PortBinding{
 				{
-					HostIP:   "127.0.0.1",
+					HostIP:   netip.MustParseAddr("127.0.0.1"),
 					HostPort: "1883",
 				},
 			}}
