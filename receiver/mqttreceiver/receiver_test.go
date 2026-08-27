@@ -1,6 +1,7 @@
 package mqttreceiver
 
 import (
+	"errors"
 	"net"
 	"path/filepath"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/receiver/receivertest"
+	"go.uber.org/zap"
 )
 
 type configModifier func(*Config)
@@ -190,4 +192,66 @@ func Test_logsReceiverResubscribesAfterReconnect(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return sink.LogRecordCount() >= 2
 	}, 5*time.Second, 50*time.Millisecond, "Expected receiver to get a message after reconnecting")
+}
+
+func Test_logsReceiver_retrySubscriptions(t *testing.T) {
+	subscriptionErrors := map[string][]error{
+		"topic/one":   nil,
+		"topic/two":   {errors.New("first attempt failed")},
+		"topic/three": {errors.New("first attempt failed"), errors.New("second attempt failed")},
+	}
+	var subscriptionCalls []string
+	client := &mqttClientStub{
+		subscribe: func(topic string, _ byte, _ mqtt.MessageHandler) mqtt.Token {
+			subscriptionCalls = append(subscriptionCalls, topic)
+			errors := subscriptionErrors[topic]
+			var tokenError error
+			if len(errors) > 0 {
+				tokenError = errors[0]
+				subscriptionErrors[topic] = errors[1:]
+			}
+			return mqttTokenStub{
+				waitTimeout: func(time.Duration) bool { return true },
+				tokenError:  func() error { return tokenError },
+			}
+		},
+	}
+	receiver := &logsReceiver{
+		config: &Config{Topics: []string{"topic/one", "topic/two", "topic/three"}},
+		logger: zap.NewNop(),
+	}
+
+	receiver.retrySubscriptions(t.Context(), client, time.Nanosecond)
+
+	require.Equal(t, []string{
+		"topic/one",
+		"topic/two",
+		"topic/three",
+		"topic/two",
+		"topic/three",
+		"topic/three",
+	}, subscriptionCalls)
+}
+
+type mqttClientStub struct {
+	mqtt.Client
+	subscribe func(string, byte, mqtt.MessageHandler) mqtt.Token
+}
+
+func (s *mqttClientStub) Subscribe(topic string, qos byte, callback mqtt.MessageHandler) mqtt.Token {
+	return s.subscribe(topic, qos, callback)
+}
+
+type mqttTokenStub struct {
+	mqtt.Token
+	waitTimeout func(time.Duration) bool
+	tokenError  func() error
+}
+
+func (s mqttTokenStub) WaitTimeout(timeout time.Duration) bool {
+	return s.waitTimeout(timeout)
+}
+
+func (s mqttTokenStub) Error() error {
+	return s.tokenError()
 }

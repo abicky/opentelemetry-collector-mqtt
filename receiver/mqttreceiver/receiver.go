@@ -2,12 +2,14 @@ package mqttreceiver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
 	"sync/atomic"
 	"time"
 
+	"github.com/cenkalti/backoff/v7"
 	"github.com/eclipse/paho.mqtt.golang"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/ottl"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/ottl/contexts/ottllog"
@@ -21,16 +23,20 @@ import (
 )
 
 const (
-	tokenTimeout = 10 * time.Second
+	tokenTimeout                     = 10 * time.Second
+	subscriptionRetryInitialInterval = time.Second
 )
 
+var errSubscriptionsPending = errors.New("mqtt subscriptions remain pending")
+
 type logsReceiver struct {
-	config       *Config
-	brokerURL    *url.URL
-	logger       *zap.Logger
-	nextConsumer consumer.Logs
-	cancel       context.CancelFunc
-	timestampExp *ottl.ValueExpression[*ottllog.TransformContext]
+	config                *Config
+	brokerURL             *url.URL
+	logger                *zap.Logger
+	nextConsumer          consumer.Logs
+	cancel                context.CancelFunc
+	timestampExp          *ottl.ValueExpression[*ottllog.TransformContext]
+	subscriptionRetryTask *backgroundTask
 }
 
 func newLogsReceiver(cfg *Config, settings receiver.Settings, nextConsumer consumer.Logs) (*logsReceiver, error) {
@@ -40,10 +46,11 @@ func newLogsReceiver(cfg *Config, settings receiver.Settings, nextConsumer consu
 	}
 
 	return &logsReceiver{
-		config:       cfg,
-		logger:       settings.Logger,
-		nextConsumer: nextConsumer,
-		timestampExp: timestampExp,
+		config:                cfg,
+		logger:                settings.Logger,
+		nextConsumer:          nextConsumer,
+		timestampExp:          timestampExp,
+		subscriptionRetryTask: newBackgroundTask(),
 	}, nil
 }
 
@@ -65,9 +72,9 @@ func (lr *logsReceiver) Start(ctx context.Context, _ component.Host) error {
 			return
 		}
 
-		if err := lr.subscribe(context.Background(), client); err != nil {
-			lr.logger.Error("Failed to restore MQTT subscriptions after reconnecting", zap.Error(err))
-		}
+		lr.subscriptionRetryTask.Restart(func(ctx context.Context) {
+			lr.retrySubscriptions(ctx, client, subscriptionRetryInitialInterval)
+		})
 	})
 	opts.SetConnectionLostHandler(func(_ mqtt.Client, err error) {
 		lr.logger.Warn("Lost connection to the MQTT broker", zap.String("broker", lr.config.Broker), zap.Error(err))
@@ -80,6 +87,7 @@ func (lr *logsReceiver) Start(ctx context.Context, _ component.Host) error {
 
 	client := mqtt.NewClient(opts)
 	lr.cancel = func() {
+		lr.subscriptionRetryTask.Stop()
 		client.Disconnect(1_000)
 		lr.logger.Debug("Disconnected the MQTT broker", zap.String("broker", lr.config.Broker))
 	}
@@ -99,13 +107,51 @@ func (lr *logsReceiver) Start(ctx context.Context, _ component.Host) error {
 
 func (lr *logsReceiver) subscribe(ctx context.Context, client mqtt.Client) error {
 	for _, topic := range lr.config.Topics {
-		lr.logger.Debug("Subscribe to the topic", zap.String("topic", topic))
-		if err := waitToken(ctx, client.Subscribe(topic, 0, lr.handleMessage)); err != nil {
-			return fmt.Errorf("failed to subscribe to the %q topic: %w", topic, err)
+		if err := lr.subscribeTopic(ctx, client, topic); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+func (lr *logsReceiver) subscribeTopic(ctx context.Context, client mqtt.Client, topic string) error {
+	lr.logger.Debug("Subscribe to the topic", zap.String("topic", topic))
+	if err := waitToken(ctx, client.Subscribe(topic, 0, lr.handleMessage)); err != nil {
+		return fmt.Errorf("failed to subscribe to the %q topic: %w", topic, err)
+	}
+
+	return nil
+}
+
+func (lr *logsReceiver) retrySubscriptions(ctx context.Context, client mqtt.Client, retryInterval time.Duration) {
+	pendingTopics := append([]string(nil), lr.config.Topics...)
+
+	retryPolicy := backoff.NewExponentialBackOff()
+	retryPolicy.InitialInterval = retryInterval
+	_, err := backoff.Retry(ctx, func() (struct{}, error) {
+		failedTopics := make([]string, 0, len(pendingTopics))
+		for _, topic := range pendingTopics {
+			if err := ctx.Err(); err != nil {
+				return struct{}{}, err
+			}
+			if err := lr.subscribeTopic(ctx, client, topic); err != nil {
+				failedTopics = append(failedTopics, topic)
+				lr.logger.Warn("Failed to restore MQTT subscription", zap.String("topic", topic), zap.Error(err))
+			}
+		}
+		if len(failedTopics) == 0 {
+			return struct{}{}, nil
+		}
+
+		pendingTopics = failedTopics
+		return struct{}{}, errSubscriptionsPending
+	}, backoff.WithBackOff(retryPolicy), backoff.WithMaxElapsedTime(0), backoff.WithNotify(func(_ error, duration time.Duration) {
+		lr.logger.Info(fmt.Sprintf("Failed to restore %d MQTT subscription(s), retrying in %s", len(pendingTopics), duration))
+	}))
+	if err != nil && !errors.Is(err, context.Canceled) {
+		lr.logger.Warn("Stopped retrying MQTT subscriptions", zap.Error(err))
+	}
 }
 
 func (lr *logsReceiver) Shutdown(_ context.Context) error {

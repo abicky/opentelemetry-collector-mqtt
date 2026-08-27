@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/Shopify/toxiproxy/v2 v2.12.0
+	github.com/cenkalti/backoff/v7 v7.0.0
 	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/moby/moby/api v1.55.0
 	github.com/open-telemetry/opentelemetry-collector-contrib/pkg/golden v0.144.0
