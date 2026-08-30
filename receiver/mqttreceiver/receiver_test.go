@@ -1,20 +1,26 @@
 package mqttreceiver
 
 import (
+	"errors"
+	"net"
 	"path/filepath"
 	"testing"
 	"time"
 
+	toxiproxy "github.com/Shopify/toxiproxy/v2/client"
 	"github.com/eclipse/paho.mqtt.golang"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/golden"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest/plogtest"
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
+	tctoxiproxy "github.com/testcontainers/testcontainers-go/modules/toxiproxy"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/consumer/consumertest"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/receiver/receivertest"
+	"go.uber.org/zap"
 )
 
 type configModifier func(*Config)
@@ -119,4 +125,138 @@ func Test_logsReceiver(t *testing.T) {
 			require.NoError(t, plogtest.CompareLogs(expected, allLogs[0], tt.compareLogsOpts...))
 		})
 	}
+}
+
+func Test_logsReceiverResubscribesAfterReconnect(t *testing.T) {
+	// Toxiproxy assigns the first proxy created with WithProxy to port 8666.
+	const proxyPort = 8666
+
+	toxiproxyContainer, err := tctoxiproxy.Run(
+		t.Context(),
+		"ghcr.io/shopify/toxiproxy:2.12.0",
+		tctoxiproxy.WithProxy("mqtt", net.JoinHostPort(testcontainers.HostInternal, "1883")),
+		testcontainers.WithHostPortAccess(1883),
+	)
+	testcontainers.CleanupContainer(t, toxiproxyContainer)
+	require.NoError(t, err, "Failed to start Toxiproxy container")
+
+	proxyHost, proxyPortString, err := toxiproxyContainer.ProxiedEndpoint(proxyPort)
+	require.NoError(t, err, "Failed to get Toxiproxy endpoint")
+	toxiproxyURI, err := toxiproxyContainer.URI(t.Context())
+	require.NoError(t, err, "Failed to get Toxiproxy URI")
+	proxy, err := toxiproxy.NewClient(toxiproxyURI).Proxy("mqtt")
+	require.NoError(t, err, "Failed to get MQTT proxy")
+
+	broker := "tcp://" + net.JoinHostPort(proxyHost, proxyPortString)
+	publisher := mqtt.NewClient(mqtt.NewClientOptions().AddBroker(broker))
+	if token := publisher.Connect(); token.Wait() {
+		require.NoError(t, token.Error(), "Failed to connect to MQTT broker")
+	}
+	t.Cleanup(func() {
+		publisher.Disconnect(1_000)
+	})
+
+	topic := "test/topic/" + t.Name()
+	cfg := createDefaultConfig().(*Config)
+	cfg.Broker = broker
+	cfg.Topics = []string{topic}
+
+	sink := new(consumertest.LogsSink)
+	receiver, err := newLogsReceiver(cfg, receivertest.NewNopSettings(component.MustNewType("mqtt")), sink)
+	require.NoError(t, err, "Failed to create receiver")
+	require.NoError(t, receiver.Start(t.Context(), componenttest.NewNopHost()), "Failed to start receiver")
+	t.Cleanup(func() {
+		require.NoError(t, receiver.Shutdown(t.Context()), "Failed to shutdown receiver")
+	})
+
+	if token := publisher.Publish(topic, 1, false, "before reconnect"); token.Wait() {
+		require.NoError(t, token.Error(), "Failed to publish message to MQTT broker")
+	}
+
+	require.Eventually(t, func() bool {
+		return sink.LogRecordCount() == 1
+	}, 5*time.Second, 50*time.Millisecond, "Expected to receive the message before reconnecting")
+
+	// Emulate connection disruption
+	require.NoError(t, proxy.Disable(), "Failed to disable MQTT proxy")
+	require.Eventually(t, func() bool {
+		return !publisher.IsConnectionOpen()
+	}, 5*time.Second, 50*time.Millisecond, "Expected to disconnect from the broker")
+	require.NoError(t, proxy.Enable(), "Failed to enable MQTT proxy")
+
+	require.Eventually(t, func() bool {
+		return publisher.IsConnectionOpen()
+	}, 5*time.Second, 50*time.Millisecond, "Expected to reconnect to the broker")
+
+	// The publisher may reconnect before the receiver has restored its subscription.
+	// Retry because a non-retained message published during that gap is discarded.
+	require.Eventually(t, func() bool {
+		token := publisher.Publish(topic, 1, false, "after reconnect")
+		if !token.WaitTimeout(time.Second) || token.Error() != nil {
+			return false
+		}
+		return sink.LogRecordCount() >= 2
+	}, 5*time.Second, 50*time.Millisecond, "Expected receiver to get a message after reconnecting")
+}
+
+func Test_logsReceiver_retrySubscriptions(t *testing.T) {
+	subscriptionErrors := map[string][]error{
+		"topic/one":   nil,
+		"topic/two":   {errors.New("first attempt failed")},
+		"topic/three": {errors.New("first attempt failed"), errors.New("second attempt failed")},
+	}
+	var subscriptionCalls []string
+	client := &mqttClientStub{
+		subscribe: func(topic string, _ byte, _ mqtt.MessageHandler) mqtt.Token {
+			subscriptionCalls = append(subscriptionCalls, topic)
+			errors := subscriptionErrors[topic]
+			var tokenError error
+			if len(errors) > 0 {
+				tokenError = errors[0]
+				subscriptionErrors[topic] = errors[1:]
+			}
+			return mqttTokenStub{
+				waitTimeout: func(time.Duration) bool { return true },
+				tokenError:  func() error { return tokenError },
+			}
+		},
+	}
+	receiver := &logsReceiver{
+		config: &Config{Topics: []string{"topic/one", "topic/two", "topic/three"}},
+		logger: zap.NewNop(),
+	}
+
+	receiver.retrySubscriptions(t.Context(), client, time.Nanosecond)
+
+	require.Equal(t, []string{
+		"topic/one",
+		"topic/two",
+		"topic/three",
+		"topic/two",
+		"topic/three",
+		"topic/three",
+	}, subscriptionCalls)
+}
+
+type mqttClientStub struct {
+	mqtt.Client
+	subscribe func(string, byte, mqtt.MessageHandler) mqtt.Token
+}
+
+func (s *mqttClientStub) Subscribe(topic string, qos byte, callback mqtt.MessageHandler) mqtt.Token {
+	return s.subscribe(topic, qos, callback)
+}
+
+type mqttTokenStub struct {
+	mqtt.Token
+	waitTimeout func(time.Duration) bool
+	tokenError  func() error
+}
+
+func (s mqttTokenStub) WaitTimeout(timeout time.Duration) bool {
+	return s.waitTimeout(timeout)
+}
+
+func (s mqttTokenStub) Error() error {
+	return s.tokenError()
 }
