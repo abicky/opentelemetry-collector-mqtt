@@ -179,17 +179,22 @@ func Test_logsReceiverResubscribesAfterReconnect(t *testing.T) {
 
 	// Emulate connection disruption
 	require.NoError(t, proxy.Disable(), "Failed to disable MQTT proxy")
+	require.Eventually(t, func() bool {
+		return !publisher.IsConnectionOpen()
+	}, 5*time.Second, 50*time.Millisecond, "Expected to disconnect from the broker")
 	require.NoError(t, proxy.Enable(), "Failed to enable MQTT proxy")
 
 	require.Eventually(t, func() bool {
 		return publisher.IsConnectionOpen()
 	}, 5*time.Second, 50*time.Millisecond, "Expected to reconnect to the broker")
 
-	if token := publisher.Publish(topic, 1, false, "after reconnect"); token.Wait() {
-		require.NoError(t, token.Error(), "Failed to publish message to MQTT broker")
-	}
-
+	// The publisher may reconnect before the receiver has restored its subscription.
+	// Retry because a non-retained message published during that gap is discarded.
 	require.Eventually(t, func() bool {
+		token := publisher.Publish(topic, 1, false, "after reconnect")
+		if !token.WaitTimeout(time.Second) || token.Error() != nil {
+			return false
+		}
 		return sink.LogRecordCount() >= 2
 	}, 5*time.Second, 50*time.Millisecond, "Expected receiver to get a message after reconnecting")
 }
