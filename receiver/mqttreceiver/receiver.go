@@ -25,9 +25,18 @@ import (
 const (
 	tokenTimeout                     = 10 * time.Second
 	subscriptionRetryInitialInterval = time.Second
+	// github.com/eclipse/paho.mqtt.golang only supports MQTT 3.1 and 3.1.1,
+	// where 0x80 is the only SUBACK failure code.
+	// See: https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html#_Toc398718071
+	subAckFailureCode = 0x80
 )
 
 var errSubscriptionsPending = errors.New("mqtt subscriptions remain pending")
+
+type mqttSubscribeToken interface {
+	mqtt.Token
+	Result() map[string]byte
+}
 
 type logsReceiver struct {
 	config                *Config
@@ -117,8 +126,22 @@ func (lr *logsReceiver) subscribe(ctx context.Context, client mqtt.Client) error
 
 func (lr *logsReceiver) subscribeTopic(ctx context.Context, client mqtt.Client, topic string) error {
 	lr.logger.Debug("Subscribe to the topic", zap.String("topic", topic))
-	if err := waitToken(ctx, client.Subscribe(topic, 0, lr.handleMessage)); err != nil {
+	token := client.Subscribe(topic, 0, lr.handleMessage)
+	if err := waitToken(ctx, token); err != nil {
 		return fmt.Errorf("failed to subscribe to the %q topic: %w", topic, err)
+	}
+
+	subscribeToken, ok := token.(mqttSubscribeToken)
+	if !ok {
+		return fmt.Errorf("failed to subscribe to the %q topic: unexpected token type %T", topic, token)
+	}
+
+	result, ok := subscribeToken.Result()[topic]
+	if !ok {
+		return fmt.Errorf("failed to subscribe to the %q topic: SUBACK result is missing", topic)
+	}
+	if result == subAckFailureCode {
+		return fmt.Errorf("failed to subscribe to the %q topic: subscription rejected by broker", topic)
 	}
 
 	return nil

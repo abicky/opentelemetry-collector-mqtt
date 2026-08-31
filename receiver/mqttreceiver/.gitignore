@@ -1,1 +1,3 @@
 /examples/*/build
+/examples/config/dynamic-security.json
+/examples/config/dynamic-security.json.pw

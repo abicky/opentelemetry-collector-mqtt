@@ -39,13 +39,7 @@ func Test_logsReceiver(t *testing.T) {
 	broker, err := mqttBrokerContainer.PortEndpoint(t.Context(), "1883", "tcp")
 	require.NoError(t, err, "Failed to get port endpoint")
 
-	publisher := mqtt.NewClient(mqtt.NewClientOptions().AddBroker(broker))
-	if token := publisher.Connect(); token.Wait() {
-		require.NoError(t, token.Error(), "Failed to connect to MQTT broker")
-	}
-	t.Cleanup(func() {
-		publisher.Disconnect(1_000)
-	})
+	publisher := newClient(t, broker)
 
 	tests := []struct {
 		name            string
@@ -67,6 +61,7 @@ func Test_logsReceiver(t *testing.T) {
 			compareLogsOpts: []plogtest.CompareLogsOption{plogtest.IgnoreObservedTimestamp(), plogtest.IgnoreTimestamp()},
 			configModifier: func(cfg *Config) {
 				cfg.Username = "username"
+				cfg.Password = "password"
 			},
 			logModifier: func(logs plog.Logs) {
 				logs.ResourceLogs().At(0).Resource().Attributes().PutStr("mqtt.username", "username")
@@ -148,13 +143,7 @@ func Test_logsReceiverResubscribesAfterReconnect(t *testing.T) {
 	require.NoError(t, err, "Failed to get MQTT proxy")
 
 	broker := "tcp://" + net.JoinHostPort(proxyHost, proxyPortString)
-	publisher := mqtt.NewClient(mqtt.NewClientOptions().AddBroker(broker))
-	if token := publisher.Connect(); token.Wait() {
-		require.NoError(t, token.Error(), "Failed to connect to MQTT broker")
-	}
-	t.Cleanup(func() {
-		publisher.Disconnect(1_000)
-	})
+	publisher := newClient(t, broker)
 
 	topic := "test/topic/" + t.Name()
 	cfg := createDefaultConfig().(*Config)
@@ -205,6 +194,7 @@ func Test_logsReceiver_retrySubscriptions(t *testing.T) {
 		"topic/two":   {errors.New("first attempt failed")},
 		"topic/three": {errors.New("first attempt failed"), errors.New("second attempt failed")},
 	}
+
 	var subscriptionCalls []string
 	client := &mqttClientStub{
 		subscribe: func(topic string, _ byte, _ mqtt.MessageHandler) mqtt.Token {
@@ -218,6 +208,7 @@ func Test_logsReceiver_retrySubscriptions(t *testing.T) {
 			return mqttTokenStub{
 				waitTimeout: func(time.Duration) bool { return true },
 				tokenError:  func() error { return tokenError },
+				result:      map[string]byte{topic: 0},
 			}
 		},
 	}
@@ -238,6 +229,35 @@ func Test_logsReceiver_retrySubscriptions(t *testing.T) {
 	}, subscriptionCalls)
 }
 
+func Test_logsReceiver_subscribeTopic(t *testing.T) {
+	broker, err := mqttBrokerContainer.PortEndpoint(t.Context(), "1883", "tcp")
+	require.NoError(t, err, "Failed to get port endpoint")
+
+	client := newClient(t, broker)
+
+	receiver := &logsReceiver{
+		logger: zap.NewNop(),
+	}
+
+	err = receiver.subscribeTopic(t.Context(), client, "test/topic/rejected")
+
+	require.ErrorContains(t, err, "subscription rejected by broker")
+}
+
+func newClient(t *testing.T, broker string) mqtt.Client {
+	t.Helper()
+
+	client := mqtt.NewClient(mqtt.NewClientOptions().AddBroker(broker))
+	if token := client.Connect(); token.Wait() {
+		require.NoError(t, token.Error(), "Failed to connect to MQTT broker")
+	}
+	t.Cleanup(func() {
+		client.Disconnect(1_000)
+	})
+
+	return client
+}
+
 type mqttClientStub struct {
 	mqtt.Client
 	subscribe func(string, byte, mqtt.MessageHandler) mqtt.Token
@@ -251,7 +271,10 @@ type mqttTokenStub struct {
 	mqtt.Token
 	waitTimeout func(time.Duration) bool
 	tokenError  func() error
+	result      map[string]byte
 }
+
+var _ mqttSubscribeToken = (*mqttTokenStub)(nil)
 
 func (s mqttTokenStub) WaitTimeout(timeout time.Duration) bool {
 	return s.waitTimeout(timeout)
@@ -259,4 +282,8 @@ func (s mqttTokenStub) WaitTimeout(timeout time.Duration) bool {
 
 func (s mqttTokenStub) Error() error {
 	return s.tokenError()
+}
+
+func (s mqttTokenStub) Result() map[string]byte {
+	return s.result
 }
